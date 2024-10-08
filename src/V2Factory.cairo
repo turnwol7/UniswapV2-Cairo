@@ -1,102 +1,117 @@
+
+use starknet::{ContractAddress};
+
+// Import the interface
+use super::contracts::interfaces::IV2Factory::IV2Factory;
+
+
 #[starknet::contract]
 mod V2Factory {
-    use super::*;
-    use starknet::syscalls::{deploy, emit_event};
-    use starknet::storage::{StorageMapTrait, DictStorage};
-    use starknet::context::{ContractState, Storage};
-    use starknet::math::{felt_add, felt_sub};
-    use starknet::prelude::*;
     
-    // use interfaces
-    use src::contracts::interfaces::IV2Factory::*;
-    
-    // use pair contract
-    use V2Pair::*;
+    use starknet::storage::{
+        Map
+    };
+    use super::ContractAddress;
+
+    use starknet::get_caller_address;
+    use starknet::contract_address_const;
+    use super::IV2Factory;
+
+    #[event]
+    #[derive(Drop, starknet::Event)]
+    enum Event {
+        PairCreated: PairCreated,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    struct PairCreated {
+        token0: ContractAddress,
+        token1: ContractAddress,
+        pair: ContractAddress,
+        pair_count: u256,
+    }
 
     #[storage]
     struct Storage {
-        fee_to: felt,
-        fee_to_setter: felt,
-        get_pair: DictStorage<(felt, felt), felt>,
-        all_pairs: DictStorage<felt, felt>,
-        all_pairs_length: felt,
+        fee_to: ContractAddress,
+        fee_to_setter: ContractAddress,
+        pairs: Map<(ContractAddress, ContractAddress), ContractAddress>,
+        all_pairs: Map<u32, ContractAddress>,
+        all_pairs_length: u32,
     }
 
-    // Event emitted when a new pair is created
-    #[event]
-    fn emit_pair_created(token0: felt, token1: felt, pair: felt, length: felt) {}
-
-    // Constructor: sets the fee_to_setter
     #[constructor]
-    fn constructor(ctx: ContractState, setter: felt) {
-        ctx.storage().fee_to_setter.write(setter);
+    fn constructor(ref self: ContractState, fee_setter: ContractAddress) {
+        self.fee_to_setter.write(fee_setter);
     }
 
-    // Returns the number of pairs created
-    #[view]
-    fn get_all_pairs_length(ctx: ContractState) -> felt {
-        ctx.storage().all_pairs_length.read()
-    }
-
-    // Create a new pair of tokens
     #[abi(embed_v0)]
-    fn create_pair(ctx: ContractState, token_a: felt, token_b: felt) -> felt {
-        // Ensure token addresses are not identical
-        assert(token_a != token_b, "UniswapV2: IDENTICAL_ADDRESSES");
+    impl V2FactoryImpl of IV2Factory<ContractState> {
+        fn create_pair(
+            ref self: ContractState,
+            token0: ContractAddress,
+            token1: ContractAddress
+        ) -> ContractAddress {
+            assert(token0 != token1, 'V2: IDENTICAL_ADDRESSES');
+            let (token0, token1) = if token0 < token1 {
+                (token0, token1)
+            } else {
+                (token1, token0)
+            };
+            assert(token0.into() != 0, 'V2: ZERO_ADDRESS');
+            assert(self.pairs.read((token0, token1)) == 0.try_into().unwrap(), 'V2: PAIR_EXISTS');
 
-        // Order tokens (lower address first)
-        let (token0, token1) = if token_a < token_b {
-            (token_a, token_b)
-        } else {
-            (token_b, token_a)
-        };
+            // Here you would deploy a new pair contract
+            // For this example, we'll use a dummy address
+            let pair = contract_address_const::<0x1>();
 
-        // Ensure token0 is not zero address
-        assert(token0 != 0, "UniswapV2: ZERO_ADDRESS");
+            self.pairs.write((token0, token1), pair);
+            
+            let length = self.all_pairs_length.read();
+            self.all_pairs.write(length, pair);
+            self.all_pairs_length.write(length + 1);
 
-        // Ensure pair doesn't already exist
-        let existing_pair = ctx.storage().get_pair.read((token0, token1));
-        assert(existing_pair == 0, "UniswapV2: PAIR_EXISTS");
+            // Emit the PairCreated event
+            self.emit(Event::PairCreated(PairCreated {
+                token0, token1, pair,
+                pair_count: (length + 1).into()
+            }));
 
-        // Deploy the pair contract using syscall
-        let (pair_address) = deploy!(
-            "UniswapV2Pair",              // Path to the compiled pair contract
-            constructor(token0, token1),  // Pass tokens to the constructor
-            salt = (token0, token1)       // Use token addresses for deterministic salt
-        );
+            pair
+        }
 
-        // Store the new pair
-        ctx.storage().get_pair.write((token0, token1), pair_address);
-        ctx.storage().get_pair.write((token1, token0), pair_address);
+        fn get_pair(
+            self: @ContractState,
+            token0: ContractAddress,
+            token1: ContractAddress
+        ) -> ContractAddress {
+            self.pairs.read((token0, token1))
+        }
 
-        // Add the pair to the list of all pairs
-        let length = ctx.storage().all_pairs_length.read();
-        ctx.storage().all_pairs.write(length, pair_address);
-        ctx.storage().all_pairs_length.write(felt_add(length, 1));
+        fn get_all_pairs(self: @ContractState, index: u256) -> ContractAddress {
+            self.all_pairs.read(index.try_into().unwrap())
+        }
 
-        // Emit the PairCreated event
-        emit_pair_created(token0, token1, pair_address, felt_add(length, 1));
+        fn get_all_pairs_length(self: @ContractState) -> u256 {
+            self.all_pairs_length.read().into()
+        }
 
-        pair_address
-    }
+        fn fee_to(self: @ContractState) -> ContractAddress {
+            self.fee_to.read()
+        }
 
-    // Setter for the fee recipient address
-    #[abi(embed_v0)]
-    fn set_fee_to(ctx: ContractState, new_fee_to: felt) {
-        let caller = ctx.caller();
-        let setter = ctx.storage().fee_to_setter.read();
-        // Only the fee setter can change the fee_to
-        assert(caller == setter, "UniswapV2: FORBIDDEN");
-        ctx.storage().fee_to.write(new_fee_to);
-    }
+        fn fee_to_setter(self: @ContractState) -> ContractAddress {
+            self.fee_to_setter.read()
+        }
 
-    // Setter for the fee_to_setter address
-    #[abi(embed_v0)]
-    fn set_fee_to_setter(ctx: ContractState, new_setter: felt) {
-        let caller = ctx.caller();
-        let setter = ctx.storage().fee_to_setter.read();
-        // Only the current fee_to_setter can change it
-        assert(caller == setter, "UniswapV2: FORBIDDEN");
-        ctx.storage().fee_to_setter.write(new_setter);
+        fn set_fee_to(ref self: ContractState, fee_to: ContractAddress) {
+            assert(get_caller_address() == self.fee_to_setter.read(), 'V2: FORBIDDEN');
+            self.fee_to.write(fee_to);
+        }
+
+        fn set_fee_to_setter(ref self: ContractState, fee_to_setter: ContractAddress) {
+            assert(get_caller_address() == self.fee_to_setter.read(), 'V2: FORBIDDEN');
+            self.fee_to_setter.write(fee_to_setter);
+        }
     }
 }

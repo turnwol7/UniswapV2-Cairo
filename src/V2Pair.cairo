@@ -1,225 +1,190 @@
-#[starknet.contract]
+use starknet::ContractAddress;
+use super::contracts::interfaces::IV2Pair::IV2Pair;
+
+#[starknet::contract]
 mod V2Pair {
-    use super::*;
-    use starknet::contract::ContractState;
-    use starknet::syscalls::{emit_event, call_contract, get_block_timestamp};
-    use starknet::storage::{StorageMapTrait, DictStorage};
-    use starknet::math::{felt_add, felt_sub, felt_mul};
-    use starknet::prelude::*;
-    use crate::libraries::{UQ112x112, Math};
+    use super::{ContractAddress, IV2Pair};
+    use openzeppelin_token::erc20::interface::{IERC20CamelDispatcher, IERC20CamelDispatcherTrait};
+
+    use starknet::{get_caller_address, get_contract_address};
+    use starknet::syscalls::{call_contract_syscall};
+  //  use core::num::traits::Sqrt;   
+    use core::num::traits::Zero;
+    use starknet::storage::Map;
     
-    // Event definitions
-    #[event]
-    fn mint_event(sender: felt252, amount0: u128, amount1: u128);
     
-    #[event]
-    fn burn_event(sender: felt252, amount0: u128, amount1: u128, to: felt252);
-    
-    #[event]
-    fn swap_event(
-        sender: felt252,
-        amount0_in: u128,
-        amount1_in: u128,
-        amount0_out: u128,
-        amount1_out: u128,
-        to: felt252
-    );
-    
-    #[event]
-    fn sync_event(reserve0: u128, reserve1: u128);
-    
-    // Storage definition
+    const PAIR_FLASH_SWAP_CALLBACK: felt252 = 0x234; // change to real callback function name
+    const MINIMUM_LIQUIDITY: u256 = 1_000;
+
     #[storage]
     struct Storage {
-        factory: felt252,
-        token0: felt252,
-        token1: felt252,
-        reserve0: u128,
-        reserve1: u128,
-        block_timestamp_last: u32,
-        price0_cumulative_last: u128,
-        price1_cumulative_last: u128,
-        k_last: u128, // reserve0 * reserve1
-        unlocked: u8, // Reentrancy lock flag
+        token0: ContractAddress,
+        token1: ContractAddress,
+        reserves0: u256,
+        reserves1: u256,
+        k_last: u256,
+
+        //erc20 helpers
+        balance_of: Map<ContractAddress, u256>,
+        total_supply: u256,
     }
-    
 
     #[constructor]
-    fn constructor(ctx: ContractState, _token0: felt252, _token1: felt252) {
-        ctx.storage().factory.write(ctx.caller());
-        ctx.storage().token0.write(_token0);
-        ctx.storage().token1.write(_token1);
-        ctx.storage().unlocked.write(1); // Initial unlocked state
+    fn constructor(ref self: ContractState, token0: ContractAddress, token1: ContractAddress) {
+        self.token0.write(token0);
+        self.token1.write(token1);
     }
 
-    // Reentrancy guard modifier
-    fn lock(self: @ContractState) {
-        assert(self.storage().unlocked.read() == 1, "UniswapV2: LOCKED");
-        self.storage().unlocked.write(0);
-        self.storage().unlocked.write(1); // Unlock after execution
-    }
+    #[abi(embed_v0)]
+    impl V2PairImpl of IV2Pair<ContractState> {
 
-    // Get reserves
-    #[starknet::interface]
-    fn get_reserves(self: @ContractState) -> (u128, u128, u32) {
-        let reserve0 = self.storage().reserve0.read();
-        let reserve1 = self.storage().reserve1.read();
-        let block_timestamp_last = self.storage().block_timestamp_last.read();
-        (reserve0, reserve1, block_timestamp_last)
-    }
+        fn swap( ref self: ContractState, amount0out: u256, amount1out: u256, to: ContractAddress, data: Span<felt252>) {
+            assert!(amount0out > 0 || amount1out > 0, "PAIR: INSUFFICIENT_OUTPUT_AMOUNT");
+            let (_reserves0, _reserves1) = self.get_reserves();
+            assert!(amount0out < _reserves0 && amount1out < _reserves1, "PAIR: INSUFFICIENT_LIQUIDITY" );
 
-    // Update reserves and price accumulators
-    fn _update(
-        ref self: ContractState,
-        balance0: u128,
-        balance1: u128,
-        reserve0: u128,
-        reserve1: u128
-    ) {
-        assert(balance0 <= u128::MAX && balance1 <= u128::MAX, "UniswapV2: OVERFLOW");
+            let _token0 =  self.token0.read();
+            let _token1 = self.token1.read();
 
-        let block_timestamp = get_block_timestamp() % u32::MAX;
-        let time_elapsed = block_timestamp - self.storage().block_timestamp_last.read();
+            assert!(to != _token0 && to != _token1, "PAIR: INVALID_TO");
 
-        if time_elapsed > 0 && reserve0 != 0 && reserve1 != 0 {
-            let price0 = UQ112x112::encode(reserve1).uqdiv(reserve0);
-            let price1 = UQ112x112::encode(reserve0).uqdiv(reserve1);
+            if amount0out > 0 {
+                IERC20CamelDispatcher{contract_address : _token0}.transfer(to, amount0out);
+            }
+            if amount1out > 0 {
+                IERC20CamelDispatcher{contract_address : _token1}.transfer(to, amount1out);
+            }
+            // if data.len() > 0 {
+            //     self.flash_swap(to, data)
+            // }
 
-            self.storage().price0_cumulative_last.write(
-                self.storage().price0_cumulative_last.read() + price0 * time_elapsed
-            );
-            self.storage().price1_cumulative_last.write(
-                self.storage().price1_cumulative_last.read() + price1 * time_elapsed
-            );
+            let _balance0 = IERC20CamelDispatcher{contract_address : _token0}.balanceOf(get_contract_address());
+            let __constructorbalance1 = IERC20CamelDispatcher{contract_address : _token1}.balanceOf(get_contract_address());
+
         }
 
-        self.storage().reserve0.write(balance0);
-        self.storage().reserve1.write(balance1);
-        self.storage().block_timestamp_last.write(block_timestamp);
+        fn burn(ref self: ContractState, to: ContractAddress) -> (u256, u256) {
+            let (_reserves0, _reserves1) = self.get_reserves();
+            let _token0 = self.token0.read();
+            let _token1 = self.token1.read();
 
-        sync_event(balance0, balance1);
-    }
+            let balance0 = IERC20CamelDispatcher{contract_address : _token0}.balanceOf(get_contract_address());
+            let balance1 = IERC20CamelDispatcher{contract_address : _token1}.balanceOf(get_contract_address());
 
-    // Mint liquidity tokens
-    #[starknet::interface]
-    fn mint(ref self: ContractState, to: felt252) -> u128 {
-        let (reserve0, reserve1, _) = self.get_reserves();
-        let balance0 = call_contract!(self.storage().token0.read(), "balanceOf", address=self.contract_address);
-        let balance1 = call_contract!(self.storage().token1.read(), "balanceOf", address=self.contract_address);
-        let amount0 = felt_sub(balance0, reserve0);
-        let amount1 = felt_sub(balance1, reserve1);
+            let liquidity = self.balance_of.read(to);
+            let _total_supply = self.total_supply.read();
 
-        let fee_on = self._mint_fee(reserve0, reserve1);
-        let total_supply = self.get_total_supply();
-        let liquidity = if total_supply == 0 {
-            let liquidity = Math::sqrt(amount0 * amount1) - 1000; // MINIMUM_LIQUIDITY
-            self._mint(0x0, 1000); // Lock the first 1000 liquidity tokens
+            let amount0 = balance0 * liquidity / _total_supply;
+            let amount1 = balance1 * liquidity / _total_supply;
+
+            assert!(amount0 > 0 &&amount1 > 0, "Pair: INSUFICIENT_LIQUIDITY_BURNED");
+
+            self._burn(to, liquidity);
+            
+            
+            //transfer tokens to the caller "to"
+            IERC20CamelDispatcher{contract_address : _token0}.transfer(to, amount0);
+            IERC20CamelDispatcher{contract_address : _token1}.transfer(to, amount1);
+            
+            self._update(balance0, balance1);
+            (amount0, amount1)
+
+        }
+
+        fn mint (ref self: ContractState, to: ContractAddress) -> u256 {
+            let (_reserves0, _reserves1) = self.get_reserves();
+            let balance0 = IERC20CamelDispatcher{contract_address : self.get_token0()}.balanceOf(to); // chek issue "to"
+            let balance1 = IERC20CamelDispatcher{contract_address : self.get_token1()}.balanceOf(to);     
+            
+            let amount0 = balance0 - _reserves0;
+            let amount1 = balance1 - _reserves1;
+
+            let _total_supply = self.total_supply.read();
+
+            let mut liquidity: u256 = 0;
+
+            if _total_supply == 0 {
+                // burn 1000
+                let sqrt_result = (amount0 + amount1).into();
+                liquidity = sqrt_result - MINIMUM_LIQUIDITY;
+                self._mint(Zero::zero(), MINIMUM_LIQUIDITY); 
+            } else {
+                let left_hand = amount0 * _total_supply / _reserves0;
+                let right_hand = amount1 * _total_supply / _reserves1;
+                liquidity = self._min(left_hand, right_hand);
+            }
+
+            assert!(liquidity > 0, "Pair: INSUFFICIENT_LIQUIDITY_MINTER");
+
+            self._mint(to, liquidity);
+            self. _update(balance0, balance1);
+
             liquidity
-        } else {
-            Math::min(
-                felt_mul(amount0, total_supply) / reserve0,
-                felt_mul(amount1, total_supply) / reserve1
-            )
-        };
 
-        assert(liquidity > 0, "UniswapV2: INSUFFICIENT_LIQUIDITY_MINTED");
-        self._mint(to, liquidity);
-
-        self._update(balance0, balance1, reserve0, reserve1);
-        if fee_on {
-            self.storage().k_last.write(felt_mul(reserve0, reserve1));
-        }
-        mint_event(self.caller(), amount0, amount1);
-
-        liquidity
-    }
-
-    // Burn liquidity tokens
-    #[starknet::interface]
-    fn burn(ref self: ContractState, to: felt252) -> (u128, u128) {
-        let (reserve0, reserve1, _) = self.get_reserves();
-        let balance0 = call_contract!(self.storage().token0.read(), "balanceOf", address=self.contract_address);
-        let balance1 = call_contract!(self.storage().token1.read(), "balanceOf", address=self.contract_address);
-        let liquidity = self.get_balance(self.contract_address);
-
-        let total_supply = self.get_total_supply();
-        let amount0 = felt_mul(liquidity, balance0) / total_supply;
-        let amount1 = felt_mul(liquidity, balance1) / total_supply;
-
-        assert(amount0 > 0 && amount1 > 0, "UniswapV2: INSUFFICIENT_LIQUIDITY_BURNED");
-        self._burn(self.contract_address, liquidity);
-        self._safe_transfer(self.storage().token0.read(), to, amount0);
-        self._safe_transfer(self.storage().token1.read(), to, amount1);
-
-        self._update(balance0, balance1, reserve0, reserve1);
-        burn_event(self.caller(), amount0, amount1, to);
-
-        (amount0, amount1)
-    }
-
-    // Swap tokens between token0 and token1
-    #[starknet::interface]
-    fn swap(
-        ref self: ContractState,
-        amount0_out: u128,
-        amount1_out: u128,
-        to: felt252
-    ) {
-        assert(amount0_out > 0 || amount1_out > 0, "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT");
-        let (reserve0, reserve1, _) = self.get_reserves();
-
-        let token0 = self.storage().token0.read();
-        let token1 = self.storage().token1.read();
-        assert(to != token0 && to != token1, "UniswapV2: INVALID_TO");
-
-        if amount0_out > 0 {
-            self._safe_transfer(token0, to, amount0_out);
-        }
-        if amount1_out > 0 {
-            self._safe_transfer(token1, to, amount1_out);
         }
 
-        let balance0 = call_contract!(token0, "balanceOf", address=self.contract_address);
-        let balance1 = call_contract!(token1, "balanceOf", address=self.contract_address);
+        //view functions
+        fn get_reserves(self: @ContractState) -> (u256, u256) {
+            (self.reserves0.read(), self.reserves1.read())
+        }
 
-        let amount0_in = felt_sub(balance0, felt_sub(reserve0, amount0_out));
-        let amount1_in = felt_sub(balance1, felt_sub(reserve1, amount1_out));
+        fn get_token0(self: @ContractState) -> ContractAddress {
+            self.token0.read()
+        }
 
-        assert(amount0_in > 0 || amount1_in > 0, "UniswapV2: INSUFFICIENT_INPUT_AMOUNT");
+        fn get_token1(self: @ContractState) -> ContractAddress {
+            self.token1.read()
+        }
 
-        let balance0_adjusted = felt_mul(balance0, 1000) - felt_mul(amount0_in, 3);
-        let balance1_adjusted = felt_mul(balance1, 1000) - felt_mul(amount1_in, 3);
-        assert(
-            felt_mul(balance0_adjusted, balance1_adjusted) >= felt_mul(reserve0, reserve1) * 1000**2,
-            "UniswapV2: K"
-        );
+        fn transfer_to (ref self: ContractState, to: ContractAddress, amount: u256) {
+            let caller = get_caller_address();
+            let balance = self.balance_of.read(caller);
+            assert!(balance == amount, "Pair: INSUFFICIENT_BALANCE");
 
-        self._update(balance0, balance1, reserve0, reserve1);
-        swap_event(self.caller(), amount0_in, amount1_in, amount0_out, amount1_out, to);
+            self.balance_of.write(caller, balance - amount);
+            self.balance_of.write(to, self.balance_of.read(to) + amount);
+        }
+
+        fn balance_of(self: @ContractState, owner: ContractAddress) -> u256 {
+            self.balance_of.read(owner)
+        }
+
     }
 
-    // Internal safe transfer function
-    fn _safe_transfer(token: felt252, to: felt252, value: u128) {
-        let success = call_contract!(token, "transfer", to, value);
-        assert(success, "UniswapV2: TRANSFER_FAILED");
-    }
 
-    // Mint fee logic
-    fn _mint_fee(self: @ContractState, reserve0: u128, reserve1: u128) -> bool {
-        let fee_to = self.storage().factory.read();  // Assume feeTo is stored in factory
-        let k_last = self.storage().k_last.read();
-        let fee_on = fee_to != 0;
-        if fee_on && k_last != 0 {
-            let root_k = Math::sqrt(reserve0 * reserve1);
-            let root_k_last = Math::sqrt(k_last);
-            if root_k > root_k_last {
-                let total_supply = self.get_total_supply();
-                let liquidity = (root_k - root_k_last) * total_supply / (root_k * 5 + root_k_last);
-                if liquidity > 0 {
-                    self._mint(fee_to, liquidity);
-                }
+    //internal trait implementation
+    #[generate_trait]
+    impl InternalImpl of InternalTrait {
+        fn _min(self: @ContractState, a: u256, b: u256) -> u256 {
+            if a < b {
+                a
+            } else {
+                b
             }
         }
-        fee_on
+        fn _mint(ref self: ContractState, to: ContractAddress, amount: u256) {
+            let _total_supply = self.total_supply.read();
+            let curr_balance = self.balance_of.read(to);
+
+            self.balance_of.write(to, curr_balance + amount);
+            self.total_supply.write(_total_supply + amount);
+        }
+
+        fn _burn(ref self: ContractState, to: ContractAddress, amount: u256) {
+            let _total_supply = self.total_supply.read();
+            let curr_balance = self.balance_of.read(to);
+
+            self.balance_of.write(to, curr_balance - amount);
+            self.total_supply.write(_total_supply - amount);
+        }
+        fn _update(ref self: ContractState, balance0: u256, balance1: u256) {
+            self.reserves0.write(balance0);
+            self.reserves1.write(balance1);
+        }
+
+        fn flash_swap(ref self: ContractState, to: ContractAddress, data: Span<felt252>) {
+           let _= call_contract_syscall(to, PAIR_FLASH_SWAP_CALLBACK, data);
+        }
+        
     }
 }
