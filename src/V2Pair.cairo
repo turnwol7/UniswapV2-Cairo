@@ -93,8 +93,8 @@ mod V2Pair {
 
         fn mint (ref self: ContractState, to: ContractAddress) -> u256 {
             let (_reserves0, _reserves1) = self.get_reserves();
-            let balance0 = IERC20CamelDispatcher{contract_address : self.get_token0()}.balanceOf(to); // chek issue "to"
-            let balance1 = IERC20CamelDispatcher{contract_address : self.get_token1()}.balanceOf(to);     
+            let balance0 = IERC20CamelDispatcher{contract_address : self.get_token0()}.balanceOf(get_contract_address());
+            let balance1 = IERC20CamelDispatcher{contract_address : self.get_token1()}.balanceOf(get_contract_address());     
             
             let amount0 = balance0 - _reserves0;
             let amount1 = balance1 - _reserves1;
